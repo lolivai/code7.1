@@ -1,575 +1,603 @@
-from pyobigram.utils import sizeof_fmt,get_file_size,createID,nice_time
-from pyobigram.client import ObigramClient,inlineQueryResultArticle
-from MoodleClient import MoodleClient
-
-from JDatabase import JsonDatabase
-import zipfile
+import requests
 import os
-import infos
-import xdlink
-import mediafire
-from megacli.mega import Mega
-import megacli.megafolder as megaf
-import megacli.mega
-import datetime
+import textwrap
+import re
+import json
+import urllib
+from bs4 import BeautifulSoup
+import requests_toolbelt as rt
+from requests_toolbelt import MultipartEncoderMonitor
+from requests_toolbelt import MultipartEncoder
+from functools import partial
+import uuid
 import time
-import youtube
-import NexCloudClient
-
-from pydownloader.downloader import Downloader
 from ProxyCloud import ProxyCloud
-import ProxyCloud
 import socket
-import tlmedia
+import socks
+import asyncio
+
+import threading
+
 import S5Crypto
 
 
+class CallingUpload:
+                def __init__(self, func,filename,args):
+                    self.func = func
+                    self.args = args
+                    self.filename = filename
+                    self.time_start = time.time()
+                    self.time_total = 0
+                    self.speed = 0
+                    self.last_read_byte = 0
+                def __call__(self,monitor):
+                    self.speed += monitor.bytes_read - self.last_read_byte
+                    self.last_read_byte = monitor.bytes_read
+                    tcurrent = time.time() - self.time_start
+                    self.time_total += tcurrent
+                    self.time_start = time.time()
+                    if self.time_total>=1:
+                            clock_time = (monitor.len - monitor.bytes_read) / (self.speed)
+                            if self.func:
+                                self.func(self.filename,monitor.bytes_read,monitor.len,self.speed,clock_time,self.args)
+                            self.time_total = 0
+                            self.speed = 0
 
-def downloadFile(downloader,filename,currentBits,totalBits,speed,time,args):
-    try:
-        bot = args[0]
-        message = args[1]
-        thread = args[2]
-        if thread.getStore('stop'):
-            downloader.stop()
-        downloadingInfo = infos.createDownloading(filename,totalBits,currentBits,speed,time,tid=thread.id)
-        bot.editMessageText(message,downloadingInfo)
-    except Exception as ex: print(str(ex))
-    pass
+class MoodleClient(object):
+    def __init__(self, user,passw,host='',repo_id=4,proxy:ProxyCloud=None):
+        self.username = user
+        self.password = passw
+        self.session = requests.Session()
+        self.path = 'https://moodle.uclv.edu.cu/'
+        self.host_tokenize = 'https://tguploader.url/'
+        if host!='':
+            self.path = host
+        self.userdata = None
+        self.userid = ''
+        self.repo_id = repo_id
+        self.sesskey = ''
+        self.proxy = None
+        if proxy :
+           self.proxy = proxy.as_dict_proxy()
 
-def uploadFile(filename,currentBits,totalBits,speed,time,args):
-    try:
-        bot = args[0]
-        message = args[1]
-        originalfile = args[2]
-        thread = args[3]
-        downloadingInfo = infos.createUploading(filename,totalBits,currentBits,speed,time,originalfile)
-        bot.editMessageText(message,downloadingInfo)
-    except Exception as ex: print(str(ex))
-    pass
+    def getsession(self):
+        return self.session
 
-def processUploadFiles(filename,filesize,files,update,bot,message,thread=None,jdb=None):
-    try:
-        bot.editMessageText(message,'🤜Preparando Para Subir☁...')
-        evidence = None
-        fileid = None
-        user_info = jdb.get_user(update.message.sender.username)
-        cloudtype = user_info['cloudtype']
-        proxy = ProxyCloud.parse(user_info['proxy'])
-        if cloudtype == 'moodle':
-            client = MoodleClient(user_info['moodle_user'],
-                                  user_info['moodle_password'],
-                                  user_info['moodle_host'],
-                                  user_info['moodle_repo_id'],
-                                  proxy=proxy)
-            loged = client.login()
-            itererr = 0
-            if loged:
-                if user_info['uploadtype'] == 'evidence':
-                    evidences = client.getEvidences()
-                    evidname = str(filename).split('.')[0]
-                    for evid in evidences:
-                        if evid['name'] == evidname:
-                            evidence = evid
-                            break
-                    if evidence is None:
-                        evidence = client.createEvidence(evidname)
-
-                originalfile = ''
-                if len(files)>1:
-                    originalfile = filename
-                draftlist = []
-                for f in files:
-                    f_size = get_file_size(f)
-                    resp = None
-                    iter = 0
-                    tokenize = False
-                    if user_info['tokenize']!=0:
-                       tokenize = True
-                    while resp is None:
-                          if user_info['uploadtype'] == 'evidence':
-                             fileid,resp = client.upload_file(f,evidence,fileid,progressfunc=uploadFile,args=(bot,message,originalfile,thread),tokenize=tokenize)
-                          if user_info['uploadtype'] == 'draft':
-                             fileid,resp = client.upload_file_draft(f,progressfunc=uploadFile,args=(bot,message,originalfile,thread),tokenize=tokenize)
-                             draftlist.append(resp)
-                          if user_info['uploadtype'] == 'perfil':
-                             fileid,resp = client.upload_file_perfil(f,progressfunc=uploadFile,args=(bot,message,originalfile,thread),tokenize=tokenize)
-                             draftlist.append(resp)
-                          if user_info['uploadtype'] == 'blog':
-                             fileid,resp = client.upload_file_blog(f,progressfunc=uploadFile,args=(bot,message,originalfile,thread),tokenize=tokenize)
-                             draftlist.append(resp)
-                          if user_info['uploadtype'] == 'calendar':
-                             fileid,resp = client.upload_file_calendar(f,progressfunc=uploadFile,args=(bot,message,originalfile,thread),tokenize=tokenize)
-                             draftlist.append(resp)
-                          iter += 1
-                          if iter>=10:
-                              break
-                    os.unlink(f)
-                if user_info['uploadtype'] == 'evidence':
-                    try:
-                        client.saveEvidence(evidence)
-                    except:pass
-                return draftlist
-            else:
-                bot.editMessageText(message,'❌Error En La Pagina❌')
-        elif cloudtype == 'cloud':
-            tokenize = False
-            if user_info['tokenize']!=0:
-               tokenize = True
-            bot.editMessageText(message,'🤜Subiendo ☁ Espere Mientras... 😄')
-            host = user_info['moodle_host']
-            user = user_info['moodle_user']
-            passw = user_info['moodle_password']
-            remotepath = user_info['dir']
-            client = NexCloudClient.NexCloudClient(user,passw,host,proxy=proxy)
-            loged = client.login()
-            if loged:
-               originalfile = ''
-               if len(files)>1:
-                    originalfile = filename
-               filesdata = []
-               for f in files:
-                   data = client.upload_file(f,path=remotepath,progressfunc=uploadFile,args=(bot,message,originalfile,thread),tokenize=tokenize)
-                   filesdata.append(data)
-                   os.unlink(f)
-               return filesdata
-        return None
-    except Exception as ex:
-        bot.editMessageText(message,f'❌Error {str(ex)}❌')
-
-
-def processFile(update,bot,message,file,thread=None,jdb=None):
-    file_size = get_file_size(file)
-    getUser = jdb.get_user(update.message.sender.username)
-    max_file_size = 1024 * 1024 * getUser['zips']
-    file_upload_count = 0
-    client = None
-    findex = 0
-    if file_size > max_file_size:
-        compresingInfo = infos.createCompresing(file,file_size,max_file_size)
-        bot.editMessageText(message,compresingInfo)
-        zipname = str(file).split('.')[0] + createID()
-        mult_file = zipfile.MultiFile(zipname,max_file_size)
-        zip = zipfile.ZipFile(mult_file,  mode='w', compression=zipfile.ZIP_DEFLATED)
-        zip.write(file)
-        zip.close()
-        mult_file.close()
-        client = processUploadFiles(file,file_size,mult_file.files,update,bot,message,jdb=jdb)
+    def getUserData(self):
         try:
-            os.unlink(file)
-        except:pass
-        file_upload_count = len(zipfile.files)
-    else:
-        client = processUploadFiles(file,file_size,[file],update,bot,message,jdb=jdb)
-        file_upload_count = 1
-    bot.editMessageText(message,'🤜Preparando Archivo📄...')
-    evidname = ''
-    files = []
-    if client:
-        if getUser['cloudtype'] == 'moodle':
-            if getUser['uploadtype'] == 'evidence':
+            tokenUrl = self.path+'login/token.php?service=moodle_mobile_app&username='+urllib.parse.quote(self.username)+'&password='+urllib.parse.quote(self.password)
+            resp = self.session.get(tokenUrl,proxies=self.proxy)
+            data = self.parsejson(resp.text)
+            data['s5token'] = S5Crypto.tokenize([self.username,self.password])
+            return data
+        except:
+            return None
+
+    def getDirectUrl(self,url):
+        tokens = str(url).split('/')
+        direct = self.path+'webservice/pluginfile.php/'+tokens[4]+'/user/private/'+tokens[-1]+'?token='+self.data['token']
+        return direct
+
+    def getToken(self,url):
+        token = self.data['token']
+
+
+    def getSessKey(self):
+        fileurl = self.path + 'my/#'
+        resp = self.session.get(fileurl,proxies=self.proxy)
+        soup = BeautifulSoup(resp.text,'html.parser')
+        sesskey  =  soup.find('input',attrs={'name':'sesskey'})['value']
+        return sesskey
+
+    def login(self):
+        try:
+            login = self.path+'login/index.php'
+            resp = self.session.get(login,proxies=self.proxy)
+            cookie = resp.cookies.get_dict()
+            soup = BeautifulSoup(resp.text,'html.parser')
+            anchor = ''
+            try:
+              anchor = soup.find('input',attrs={'name':'anchor'})['value']
+            except:pass
+            logintoken = ''
+            try:
+                logintoken = soup.find('input',attrs={'name':'logintoken'})['value']
+            except:pass
+            username = self.username
+            password = self.password
+            payload = {'anchor': '', 'logintoken': logintoken,'username': username, 'password': password, 'rememberusername': 1}
+            loginurl = self.path+'login/index.php'
+            resp2 = self.session.post(loginurl, data=payload,proxies=self.proxy)
+            soup = BeautifulSoup(resp2.text,'html.parser')
+            counter = 0
+            for i in resp2.text.splitlines():
+                if "loginerrors" in i or (0 < counter <= 3):
+                    counter += 1
+                    print(i)
+            if counter>0:
+                print('No pude iniciar sesion')
+                return False
+            else:
                 try:
-                    evidname = str(file).split('.')[0]
-                    txtname = evidname + '.txt'
-                    evidences = client.getEvidences()
-                    for ev in evidences:
-                        if ev['name'] == evidname:
-                           files = ev['files']
-                           break
-                        if len(ev['files'])>0:
-                           findex+=1
-                    client.logout()
+                    self.userid = soup.find('div',{'id':'nav-notification-popover-container'})['data-userid']
+                except:
+                    try:
+                        self.userid = soup.find('a',{'title':'Enviar un mensaje'})['data-userid']
+                    except:pass
+                print('E iniciado sesion con exito')
+                self.userdata = self.getUserData()
+                try:
+                    self.sesskey  =  self.getSessKey()
                 except:pass
-            if getUser['uploadtype'] == 'draft' or getUser['uploadtype'] == 'blog' or getUser['uploadtype'] == 'calendar':
-               for draft in client:
-                   files.append({'name':draft['file'],'directurl':draft['url']})
-        else:
-            for data in client:
-                files.append({'name':data['name'],'directurl':data['url']})
-        bot.deleteMessage(message.chat.id,message.message_id)
-        finishInfo = infos.createFinishUploading(file,file_size,max_file_size,file_upload_count,file_upload_count,findex)
-        filesInfo = infos.createFileMsg(file,files)
-        bot.sendMessage(message.chat.id,finishInfo+'\n'+filesInfo,parse_mode='html')
-        if len(files)>0:
-            txtname = str(file).split('/')[-1].split('.')[0] + '.txt'
-            sendTxt(txtname,files,update,bot)
-    else:
-        bot.editMessageText(message,'❌Error En La Pagina❌')
+                return True
+        except Exception as ex:
+            pass
+        return False
 
-def ddl(update,bot,message,url,file_name='',thread=None,jdb=None):
-    downloader = Downloader()
-    file = downloader.download_url(url,progressfunc=downloadFile,args=(bot,message,thread))
-    if not downloader.stoping:
-        if file:
-            processFile(update,bot,message,file,jdb=jdb)
-        else:
-            megadl(update,bot,message,url,file_name,thread,jdb=jdb)
+    def createEvidence(self,name,desc=''):
+        evidenceurl = self.path + 'admin/tool/lp/user_evidence_edit.php?userid=' + self.userid
+        resp = self.session.get(evidenceurl,proxies=self.proxy)
+        soup = BeautifulSoup(resp.text,'html.parser')
 
-def megadl(update,bot,message,megaurl,file_name='',thread=None,jdb=None):
-    megadl = megacli.mega.Mega({'verbose': True})
-    megadl.login()
-    try:
-        info = megadl.get_public_url_info(megaurl)
-        file_name = info['name']
-        megadl.download_url(megaurl,dest_path=None,dest_filename=file_name,progressfunc=downloadFile,args=(bot,message,thread))
-        if not megadl.stoping:
-            processFile(update,bot,message,file_name,thread=thread)
-    except:
-        files = megaf.get_files_from_folder(megaurl)
-        for f in files:
-            file_name = f['name']
-            megadl._download_file(f['handle'],f['key'],dest_path=None,dest_filename=file_name,is_public=False,progressfunc=downloadFile,args=(bot,message,thread),f_data=f['data'])
-            if not megadl.stoping:
-                processFile(update,bot,message,file_name,thread=thread)
+        sesskey  =  self.sesskey
+        files = self.extractQuery(soup.find('object')['data'])['itemid']
+
+
+
+        saveevidence = self.path + 'admin/tool/lp/user_evidence_edit.php?id=&userid='+self.userid+'&return='
+        payload = {'userid':self.userid,
+                   'sesskey':sesskey,
+                   '_qf__tool_lp_form_user_evidence':1,
+                   'name':name,'description[text]':desc,
+                   'description[format]':1,
+                   'url':'',
+                   'files':files,
+                   'submitbutton':'Guardar+cambios'}
+        resp = self.session.post(saveevidence,data=payload,proxies=self.proxy)
+
+        evidenceid = str(resp.url).split('?')[1].split('=')[1]
+
+        return {'name':name,'desc':desc,'id':evidenceid,'url':resp.url,'files':[]}
+
+    def createBlog(self,name,itemid,desc="<p+dir=\"ltr\"+style=\"text-align:+left;\">asd<br></p>"):
+        post_attach = f'{self.path}blog/edit.php?action=add&userid='+self.userid
+        resp = self.session.get(post_attach,proxies=self.proxy)
+        soup = BeautifulSoup(resp.text,'html.parser') 
+        attachment_filemanager = soup.find('input',{'id':'id_attachment_filemanager'})['value']
+        post_url = f'{self.path}blog/edit.php'
+        payload = {'action':'add',
+                   'entryid':'',
+                   'modid':0,
+                   'courseid':0,
+                   'sesskey':self.sesskey,
+                   '_qf__blog_edit_form':1,
+                   'mform_isexpanded_id_general':1,
+                   'mform_isexpanded_id_tagshdr':1,
+                   'subject':name,
+                   'summary_editor[text]':desc,
+                   'summary_editor[format]':1,
+                   'summary_editor[itemid]':itemid,
+                   'attachment_filemanager':attachment_filemanager,
+                   'publishstate':'site',
+                   'tags':'_qf__force_multiselect_submission',
+                   'submitbutton':'Guardar+cambios'}
+        resp = self.session.post(post_url,data=payload,proxies=self.proxy)
+        return resp
+
+
+
+    def saveEvidence(self,evidence):
+        evidenceurl = self.path + 'admin/tool/lp/user_evidence_edit.php?id='+evidence['id']+'&userid='+self.userid+'&return=list'
+        resp = self.session.get(evidenceurl,proxies=self.proxy)
+        soup = BeautifulSoup(resp.text,'html.parser')
+        sesskey  =  soup.find('input',attrs={'name':'sesskey'})['value']
+        files = evidence['files']
+        saveevidence = self.path + 'admin/tool/lp/user_evidence_edit.php?id='+evidence['id']+'&userid='+self.userid+'&return=list'
+        payload = {'userid':self.userid,
+                   'sesskey':sesskey,
+                   '_qf__tool_lp_form_user_evidence':1,
+                   'name':evidence['name'],'description[text]':evidence['desc'],
+                   'description[format]':1,'url':'',
+                   'files':files,
+                   'submitbutton':'Guardar+cambios'}
+        resp = self.session.post(saveevidence,data=payload,proxies=self.proxy)
+        return evidence
+
+    def getEvidences(self):
+        evidencesurl = self.path + 'admin/tool/lp/user_evidence_list.php?userid=' + self.userid 
+        resp = self.session.get(evidencesurl,proxies=self.proxy)
+        soup = BeautifulSoup(resp.text,'html.parser')
+        nodes = soup.find_all('tr',{'data-region':'user-evidence-node'})
+        list = []
+        for n in nodes:
+            nodetd = n.find_all('td')
+            evurl = nodetd[0].find('a')['href']
+            evname = n.find('a').next
+            evid = evurl.split('?')[1].split('=')[1]
+            nodefiles = nodetd[1].find_all('a')
+            nfilelist = []
+            for f in nodefiles:
+                url = str(f['href'])
+                directurl = url
+                try:
+                    directurl = url + '&token=' + self.userdata['token']
+                    directurl = str(directurl).replace('pluginfile.php','webservice/pluginfile.php')
+                except:pass
+                nfilelist.append({'name':f.next,'url':url,'directurl':directurl})
+            list.append({'name':evname,'desc':'','id':evid,'url':evurl,'files':nfilelist})
+        return list
+
+    def deleteEvidence(self,evidence):
+        evidencesurl = self.path + 'admin/tool/lp/user_evidence_edit.php?userid=' + self.userid
+        resp = self.session.get(evidencesurl,proxies=self.proxy)
+        soup = BeautifulSoup(resp.text,'html.parser')
+        sesskey  =  soup.find('input',attrs={'name':'sesskey'})['value']
+        deleteUrl = self.path+'lib/ajax/service.php?sesskey='+sesskey+'&info=core_competency_delete_user_evidence,tool_lp_data_for_user_evidence_list_page'
+        savejson = [{"index":0,"methodname":"core_competency_delete_user_evidence","args":{"id":evidence['id']}},
+                    {"index":1,"methodname":"tool_lp_data_for_user_evidence_list_page","args":{"userid":self.userid }}]
+        headers = {'Content-type': 'application/json', 'Accept': 'application/json, text/javascript, */*; q=0.01'}
+        resp = self.session.post(deleteUrl, json=savejson,headers=headers,proxies=self.proxy)
         pass
-    pass
-
-def sendTxt(name,files,update,bot):
-                txt = open(name,'w')
-                fi = 0
-                for f in files:
-                    separator = ''
-                    if fi < len(files)-1:
-                        separator += '\n'
-                    txt.write(f['directurl']+separator)
-                    fi += 1
-                txt.close()
-                bot.sendFile(update.message.chat.id,name)
-                os.unlink(name)
-
-def onmessage(update,bot:ObigramClient):
-    try:
-        thread = bot.this_thread
-        username = update.message.sender.username
-        tl_admin_user = os.environ.get('tl_admin_user')
-
-        #set in debug
-        tl_admin_user = 'obisoftdev'
-
-        jdb = JsonDatabase('database')
-        jdb.check_create()
-        jdb.load()
-
-        user_info = jdb.get_user(username)
-
-        if username == tl_admin_user or user_info :  # validate user
-            if user_info is None:
-                if username == tl_admin_user:
-                    jdb.create_admin(username)
-                else:
-                    jdb.create_user(username)
-                user_info = jdb.get_user(username)
-                jdb.save()
-        else:return
 
 
-        msgText = ''
-        try: msgText = update.message.text
-        except:pass
 
-        # comandos de admin
-        if '/adduser' in msgText:
-            isadmin = jdb.is_admin(username)
-            if isadmin:
-                try:
-                    user = str(msgText).split(' ')[1]
-                    jdb.create_user(user)
-                    jdb.save()
-                    msg = '😃Genial @'+user+' ahora tiene acceso al bot👍'
-                    bot.sendMessage(update.message.chat.id,msg)
-                except:
-                    bot.sendMessage(update.message.chat.id,'❌Error en el comando /adduser username❌')
-            else:
-                bot.sendMessage(update.message.chat.id,'❌No Tiene Permiso❌')
-            return
-        if '/banuser' in msgText:
-            isadmin = jdb.is_admin(username)
-            if isadmin:
-                try:
-                    user = str(msgText).split(' ')[1]
-                    if user == username:
-                        bot.sendMessage(update.message.chat.id,'❌No Se Puede Banear Usted❌')
-                        return
-                    jdb.remove(user)
-                    jdb.save()
-                    msg = '🦶Fuera @'+user+' Baneado❌'
-                    bot.sendMessage(update.message.chat.id,msg)
-                except:
-                    bot.sendMessage(update.message.chat.id,'❌Error en el comando /banuser username❌')
-            else:
-                bot.sendMessage(update.message.chat.id,'❌No Tiene Permiso❌')
-            return
-        if '/getdb' in msgText:
-            isadmin = jdb.is_admin(username)
-            if isadmin:
-                bot.sendMessage(update.message.chat.id,'Base De Datos👇')
-                bot.sendFile(update.message.chat.id,'database.jdb')
-            else:
-                bot.sendMessage(update.message.chat.id,'❌No Tiene Permiso❌')
-            return
-        # end
+    def upload_file(self,file,evidence=None,itemid=None,progressfunc=None,args=(),tokenize=False):
+        try:
+            fileurl = self.path + 'admin/tool/lp/user_evidence_edit.php?userid=' + self.userid
+            resp = self.session.get(fileurl,proxies=self.proxy)
+            soup = BeautifulSoup(resp.text,'html.parser')
+            sesskey = self.sesskey
+            if self.sesskey=='':
+                sesskey  =  soup.find('input',attrs={'name':'sesskey'})['value']
+            _qf__user_files_form = 1
+            query = self.extractQuery(soup.find('object',attrs={'type':'text/html'})['data'])
+            client_id = self.getclientid(resp.text)
+        
+            itempostid = query['itemid']
+            if itemid:
+                itempostid = itemid
 
-        # comandos de usuario
-        if '/tutorial' in msgText:
-            tuto = open('tuto.txt','r')
-            bot.sendMessage(update.message.chat.id,tuto.read())
-            tuto.close()
-            return
-        if '/myuser' in msgText:
-            getUser = user_info
-            if getUser:
-                statInfo = infos.createStat(username,getUser,jdb.is_admin(username))
-                bot.sendMessage(update.message.chat.id,statInfo)
-                return
-        if '/zips' in msgText:
-            getUser = user_info
-            if getUser:
-                try:
-                   size = int(str(msgText).split(' ')[1])
-                   getUser['zips'] = size
-                   jdb.save_data_user(username,getUser)
-                   jdb.save()
-                   msg = '😃Genial los zips seran de '+ sizeof_fmt(size*1024*1024)+' las partes👍'
-                   bot.sendMessage(update.message.chat.id,msg)
-                except:
-                   bot.sendMessage(update.message.chat.id,'❌Error en el comando /zips size❌')
-                return
-        if '/account' in msgText:
+            of = open(file,'rb')
+            b = uuid.uuid4().hex
+            upload_data = {
+                'title':(None,''),
+                'author':(None,'ObysoftDev'),
+                'license':(None,'allrightsreserved'),
+                'itemid':(None,itempostid),
+                'repo_id':(None,str(self.repo_id)),
+                'p':(None,''),
+                'page':(None,''),
+                'env':(None,query['env']),
+                'sesskey':(None,sesskey),
+                'client_id':(None,client_id),
+                'maxbytes':(None,query['maxbytes']),
+                'areamaxbytes':(None,query['areamaxbytes']),
+                'ctx_id':(None,query['ctx_id']),
+                'savepath':(None,'/')}
+            upload_file = {
+                'repo_upload_file':(file,of,'application/octet-stream'),
+                **upload_data
+                }
+            post_file_url = self.path+'repository/repository_ajax.php?action=upload'
+            encoder = rt.MultipartEncoder(upload_file,boundary=b)
+            progrescall = CallingUpload(progressfunc,file,args)
+            callback = partial(progrescall)
+            monitor = MultipartEncoderMonitor(encoder,callback=callback)
+            resp2 = self.session.post(post_file_url,data=monitor,headers={"Content-Type": "multipart/form-data; boundary="+b},proxies=self.proxy)
+            of.close()
+
+            #save evidence
+            if evidence:
+                evidence['files'] = itempostid
+
+            data = self.parsejson(resp2.text)
+            data['url'] = str(data['url']).replace('\\','')
+            if self.userdata:
+                if 'token' in self.userdata and not tokenize:
+                    name = str(data['url']).split('/')[-1]
+                    data['url'] = self.path+'webservice/pluginfile.php/'+query['ctx_id']+'/core_competency/userevidence/'+evidence['id']+'/'+name+'?token='+self.userdata['token']
+                if tokenize:
+                    data['url'] = self.host_tokenize + S5Crypto.encrypt(data['url']) + '/' + self.userdata['s5token']
+            return itempostid,data
+        except:
+            return None,None
+
+    def upload_file_blog(self,file,blog=None,itemid=None,progressfunc=None,args=(),tokenize=False):
+        try:
+            fileurl = self.path + 'blog/edit.php?action=add&userid=' + self.userid
+            resp = self.session.get(fileurl,proxies=self.proxy)
+            soup = BeautifulSoup(resp.text,'html.parser')
+            sesskey = self.sesskey
+            if self.sesskey=='':
+                sesskey  =  soup.find('input',attrs={'name':'sesskey'})['value']
+            _qf__user_files_form = 1
+            query = self.extractQuery(soup.find('object',attrs={'type':'text/html'})['data'])
+            client_id = self.getclientid(resp.text)
+        
+            itempostid = query['itemid']
+            if itemid:
+                itempostid = itemid
+
+            of = open(file,'rb')
+            b = uuid.uuid4().hex
+            upload_data = {
+                'title':(None,''),
+                'author':(None,'ObysoftDev'),
+                'license':(None,'allrightsreserved'),
+                'itemid':(None,itempostid),
+                'repo_id':(None,str(self.repo_id)),
+                'p':(None,''),
+                'page':(None,''),
+                'env':(None,query['env']),
+                'sesskey':(None,sesskey),
+                'client_id':(None,client_id),
+                'maxbytes':(None,query['maxbytes']),
+                'areamaxbytes':(None,query['areamaxbytes']),
+                'ctx_id':(None,query['ctx_id']),
+                'savepath':(None,'/')}
+            upload_file = {
+                'repo_upload_file':(file,of,'application/octet-stream'),
+                **upload_data
+                }
+            post_file_url = self.path+'repository/repository_ajax.php?action=upload'
+            encoder = rt.MultipartEncoder(upload_file,boundary=b)
+            progrescall = CallingUpload(progressfunc,file,args)
+            callback = partial(progrescall)
+            monitor = MultipartEncoderMonitor(encoder,callback=callback)
+            resp2 = self.session.post(post_file_url,data=monitor,headers={"Content-Type": "multipart/form-data; boundary="+b},proxies=self.proxy)
+            of.close()
+
+            data = self.parsejson(resp2.text)
+            data['url'] = str(data['url']).replace('\\','')
+            if self.userdata:
+                if 'token' in self.userdata and not tokenize:
+                    data['url'] = str(data['url']).replace('pluginfile.php/','webservice/pluginfile.php/') + '?token=' + self.userdata['token']
+                if tokenize:
+                    data['url'] = self.host_tokenize + S5Crypto.encrypt(data['url']) + '/' + self.userdata['s5token']
+            return itempostid,data
+        except:
+            return None,None
+
+    def upload_file_perfil(self,file,progressfunc=None,args=(),tokenize=False):
+            file_edit = f'{self.path}user/edit.php?id={self.userid}&returnto=profile'
+            #https://eduvirtual.uho.edu.cu/user/profile.php
+            resp = self.session.get(file_edit,proxies=self.proxy)
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            sesskey = self.sesskey
+            if self.sesskey=='':
+                sesskey  =  soup.find('input',attrs={'name':'sesskey'})['value']
+            usertext =  'User0075_69'
+            query = self.extractQuery(soup.find('object',attrs={'type':'text/html'})['data'])
+            client_id = str(soup.find('div',{'class':'filemanager'})['id']).replace('filemanager-','')
+
+            upload_file = f'{self.path}repository/repository_ajax.php?action=upload'
+
+            of = open(file,'rb')
+            b = uuid.uuid4().hex
+            upload_data = {
+                'title':(None,''),
+                'author':(None,'User0075'),
+                'license':(None,'allrightsreserved'),
+                'itemid':(None,query['itemid']),
+                'repo_id':(None,str(self.repo_id)),
+                'p':(None,''),
+                'page':(None,''),
+                'env':(None,query['env']),
+                'sesskey':(None,sesskey),
+                'client_id':(None,client_id),
+                'maxbytes':(None,query['maxbytes']),
+                'areamaxbytes':(None,query['areamaxbytes']),
+                'ctx_id':(None,query['ctx_id']),
+                'savepath':(None,'/')}
+            upload_file = {
+                'repo_upload_file':(file,of,'application/octet-stream'),
+                **upload_data
+                }
+            post_file_url = self.path+'repository/repository_ajax.php?action=upload'
+            encoder = rt.MultipartEncoder(upload_file,boundary=b)
+            progrescall = CallingUpload(progressfunc,file,args)
+            callback = partial(progrescall)
+            monitor = MultipartEncoderMonitor(encoder,callback=callback)
+            resp2 = self.session.post(post_file_url,data=monitor,headers={"Content-Type": "multipart/form-data; boundary="+b},proxies=self.proxy)
+            of.close()
+            
+            data = self.parsejson(resp2.text)
+            data['url'] = str(data['url']).replace('\\','')
+            if self.userdata:
+                if 'token' in self.userdata and not tokenize:
+                    data['url'] = str(data['url']).replace('pluginfile.php/','webservice/pluginfile.php/') + '?token=' + self.userdata['token']
+                if tokenize:
+                    data['url'] = self.host_tokenize + S5Crypto.encrypt(data['url']) + '/' + self.userdata['s5token']
+
+            payload = {
+                'returnurl': file_edit,
+                'sesskey': sesskey,
+                '_qf__user_files_form': '.jpg',
+                'submitbutton': 'Guardar+cambios'
+            }
+            resp3 = self.session.post(fileurl, data = payload)
+
+            return None,data
+
+    def upload_file_draft(self,file,progressfunc=None,args=(),tokenize=False):
+            file_edit = f'{self.path}user/files.php'
+            #https://eduvirtual.uho.edu.cu/user/profile.php
+            resp = self.session.get(file_edit,proxies=self.proxy)
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            sesskey = self.sesskey
+            if self.sesskey=='':
+                sesskey  =  soup.find('input',attrs={'name':'sesskey'})['value']
+            usertext =  'User0075_69'
+            query = self.extractQuery(soup.find('object',attrs={'type':'text/html'})['data'])
+            client_id = str(soup.find('div',{'class':'filemanager'})['id']).replace('filemanager-','')
+
+            upload_file = f'{self.path}repository/repository_ajax.php?action=upload'
+
+            of = open(file,'rb')
+            b = uuid.uuid4().hex
+            upload_data = {
+                'title':(None,''),
+                'author':(None,'User0075_69'),
+                'license':(None,'allrightsreserved'),
+                'itemid':(None,query['itemid']),
+                'repo_id':(None,str(self.repo_id)),
+                'p':(None,''),
+                'page':(None,''),
+                'env':(None,query['env']),
+                'sesskey':(None,sesskey),
+                'client_id':(None,client_id),
+                'maxbytes':(None,query['maxbytes']),
+                'areamaxbytes':(None,query['areamaxbytes']),
+                'ctx_id':(None,query['ctx_id']),
+                'savepath':(None,'/')}
+            upload_file = {
+                'repo_upload_file':(file,of,'application/octet-stream'),
+                **upload_data
+                }
+            post_file_url = self.path+'repository/repository_ajax.php?action=upload'
+            encoder = rt.MultipartEncoder(upload_file,boundary=b)
+            progrescall = CallingUpload(progressfunc,file,args)
+            callback = partial(progrescall)
+            monitor = MultipartEncoderMonitor(encoder,callback=callback)
+            resp2 = self.session.post(post_file_url,data=monitor,headers={"Content-Type": "multipart/form-data; boundary="+b},proxies=self.proxy)
+            of.close()
+            
+            data = self.parsejson(resp2.text)
+            data['url'] = str(data['url']).replace('\\','')
+            if self.userdata:
+                if 'token' in self.userdata and not tokenize:
+                    data['url'] = str(data['url']).replace('pluginfile.php/','webservice/pluginfile.php/') + '?token=' + self.userdata['token']
+                if tokenize:
+                    data['url'] = self.host_tokenize + S5Crypto.encrypt(data['url']) + '/' + self.userdata['s5token']
+            return None,data
+
+    def upload_file_calendar(self,file,progressfunc=None,args=(),tokenize=False):
+            file_edit = f'{self.path}/calendar/managesubscriptions.php'
+            #https://eduvirtual.uho.edu.cu/user/profile.php
+            resp = self.session.get(file_edit,proxies=self.proxy)
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            sesskey = self.sesskey
+            if self.sesskey=='':
+                sesskey  =  soup.find('input',attrs={'name':'sesskey'})['value']
+            usertext =  'User0075_69'
+            query = self.extractQuery(soup.find('object',attrs={'type':'text/html'})['data'])
+            client_id = str(soup.find('input',{'name':'importfilechoose'})['id']).replace('filepicker-button-','')
+
+            upload_file = f'{self.path}repository/repository_ajax.php?action=upload'
+
+            of = open(file,'rb')
+            b = uuid.uuid4().hex
+            upload_data = {
+                'title':(None,''),
+                'author':(None,'User0075_69'),
+                'license':(None,'allrightsreserved'),
+                'itemid':(None,query['itemid']),
+                'repo_id':(None,str(self.repo_id)),
+                'p':(None,''),
+                'page':(None,''),
+                'env':(None,query['env']),
+                'sesskey':(None,sesskey),
+                'client_id':(None,client_id),
+                'maxbytes':(None,query['maxbytes']),
+                'areamaxbytes':(None,query['maxbytes']),
+                'ctx_id':(None,query['ctx_id']),
+                'savepath':(None,'/')}
+            upload_file = {
+                'repo_upload_file':(file,of,'application/octet-stream'),
+                **upload_data
+                }
+            post_file_url = self.path+'repository/repository_ajax.php?action=upload'
+            encoder = rt.MultipartEncoder(upload_file,boundary=b)
+            progrescall = CallingUpload(progressfunc,file,args)
+            callback = partial(progrescall)
+            monitor = MultipartEncoderMonitor(encoder,callback=callback)
+            resp2 = self.session.post(post_file_url,data=monitor,headers={"Content-Type": "multipart/form-data; boundary="+b},proxies=self.proxy)
+            of.close()
+            
+            data = self.parsejson(resp2.text)
+            data['url'] = str(data['url']).replace('\\','')
+            if self.userdata:
+                if 'token' in self.userdata and not tokenize:
+                    data['url'] = str(data['url']).replace('pluginfile.php/','webservice/pluginfile.php/') + '?token=' + self.userdata['token']
+                if tokenize:
+                    data['url'] = self.host_tokenize + S5Crypto.encrypt(data['url']) + '/' + self.userdata['s5token']
+            return None,data
+    
+    def parsejson(self,json):
+        data = {}
+        tokens = str(json).replace('{','').replace('}','').split(',')
+        for t in tokens:
+            split = str(t).split(':',1)
+            data[str(split[0]).replace('"','')] = str(split[1]).replace('"','')
+        return data
+
+    def getclientid(self,html):
+        index = str(html).index('client_id')
+        max = 25
+        ret = html[index:(index+max)]
+        return str(ret).replace('client_id":"','')
+
+    def extractQuery(self,url):
+        tokens = str(url).split('?')[1].split('&')
+        retQuery = {}
+        for q in tokens:
+            qspl = q.split('=')
             try:
-                account = str(msgText).split(' ',2)[1].split(',')
-                user = account[0]
-                passw = account[1]
-                getUser = user_info
-                if getUser:
-                    getUser['moodle_user'] = user
-                    getUser['moodle_password'] = passw
-                    jdb.save_data_user(username,getUser)
-                    jdb.save()
-                    statInfo = infos.createStat(username,getUser,jdb.is_admin(username))
-                    bot.sendMessage(update.message.chat.id,statInfo)
+                retQuery[qspl[0]] = qspl[1]
             except:
-                bot.sendMessage(update.message.chat.id,'❌Error en el comando /account user,password❌')
-            return
-        if '/host' in msgText:
-            try:
-                cmd = str(msgText).split(' ',2)
-                host = cmd[1]
-                getUser = user_info
-                if getUser:
-                    getUser['moodle_host'] = host
-                    jdb.save_data_user(username,getUser)
-                    jdb.save()
-                    statInfo = infos.createStat(username,getUser,jdb.is_admin(username))
-                    bot.sendMessage(update.message.chat.id,statInfo)
-            except:
-                bot.sendMessage(update.message.chat.id,'❌Error en el comando /host moodlehost❌')
-            return
-        if '/repoid' in msgText:
-            try:
-                cmd = str(msgText).split(' ',2)
-                repoid = int(cmd[1])
-                getUser = user_info
-                if getUser:
-                    getUser['moodle_repo_id'] = repoid
-                    jdb.save_data_user(username,getUser)
-                    jdb.save()
-                    statInfo = infos.createStat(username,getUser,jdb.is_admin(username))
-                    bot.sendMessage(update.message.chat.id,statInfo)
-            except:
-                bot.sendMessage(update.message.chat.id,'❌Error en el comando /repo id❌')
-            return
-        if '/tokenize_on' in msgText:
-            try:
-                getUser = user_info
-                if getUser:
-                    getUser['tokenize'] = 1
-                    jdb.save_data_user(username,getUser)
-                    jdb.save()
-                    statInfo = infos.createStat(username,getUser,jdb.is_admin(username))
-                    bot.sendMessage(update.message.chat.id,statInfo)
-            except:
-                bot.sendMessage(update.message.chat.id,'❌Error en el comando /tokenize state❌')
-            return
-        if '/tokenize_off' in msgText:
-            try:
-                getUser = user_info
-                if getUser:
-                    getUser['tokenize'] = 0
-                    jdb.save_data_user(username,getUser)
-                    jdb.save()
-                    statInfo = infos.createStat(username,getUser,jdb.is_admin(username))
-                    bot.sendMessage(update.message.chat.id,statInfo)
-            except:
-                bot.sendMessage(update.message.chat.id,'❌Error en el comando /tokenize state❌')
-            return
-        if '/cloud' in msgText:
-            try:
-                cmd = str(msgText).split(' ',2)
-                repoid = cmd[1]
-                getUser = user_info
-                if getUser:
-                    getUser['cloudtype'] = repoid
-                    jdb.save_data_user(username,getUser)
-                    jdb.save()
-                    statInfo = infos.createStat(username,getUser,jdb.is_admin(username))
-                    bot.sendMessage(update.message.chat.id,statInfo)
-            except:
-                bot.sendMessage(update.message.chat.id,'❌Error en el comando /cloud (moodle or cloud)❌')
-            return
-        if '/uptype' in msgText:
-            try:
-                cmd = str(msgText).split(' ',2)
-                type = cmd[1]
-                getUser = user_info
-                if getUser:
-                    getUser['uploadtype'] = type
-                    jdb.save_data_user(username,getUser)
-                    jdb.save()
-                    statInfo = infos.createStat(username,getUser,jdb.is_admin(username))
-                    bot.sendMessage(update.message.chat.id,statInfo)
-            except:
-                bot.sendMessage(update.message.chat.id,'❌Error en el comando /uptype (typo de subida (evidence,draft,blog))❌')
-            return
-        if '/proxy' in msgText:
-            try:
-                cmd = str(msgText).split(' ',2)
-                proxy = cmd[1]
-                getUser = user_info
-                if getUser:
-                    getUser['proxy'] = proxy
-                    jdb.save_data_user(username,getUser)
-                    jdb.save()
-                    statInfo = infos.createStat(username,getUser,jdb.is_admin(username))
-                    bot.sendMessage(update.message.chat.id,statInfo)
-            except:
-                if user_info:
-                    user_info['proxy'] = ''
-                    statInfo = infos.createStat(username,user_info,jdb.is_admin(username))
-                    bot.sendMessage(update.message.chat.id,statInfo)
-            return
-        if '/dir' in msgText:
-            try:
-                cmd = str(msgText).split(' ',2)
-                repoid = cmd[1]
-                getUser = user_info
-                if getUser:
-                    getUser['dir'] = repoid + '/'
-                    jdb.save_data_user(username,getUser)
-                    jdb.save()
-                    statInfo = infos.createStat(username,getUser,jdb.is_admin(username))
-                    bot.sendMessage(update.message.chat.id,statInfo)
-            except:
-                bot.sendMessage(update.message.chat.id,'❌Error en el comando /dir folder❌')
-            return
-        if '/cancel_' in msgText:
-            try:
-                cmd = str(msgText).split('_',2)
-                tid = cmd[1]
-                tcancel = bot.threads[tid]
-                msg = tcancel.getStore('msg')
-                tcancel.store('stop',True)
-                time.sleep(3)
-                bot.editMessageText(msg,'❌Tarea Cancelada❌')
-            except Exception as ex:
-                print(str(ex))
-            return
-        #end
+                 retQuery[qspl[0]] = None
+        return retQuery
 
-        message = bot.sendMessage(update.message.chat.id,'🕰Procesando🕰...')
+    def getFiles(self):
+        urlfiles = self.path+'user/files.php'
+        resp = self.session.get(urlfiles,proxies=self.proxy)
+        soup = BeautifulSoup(resp.text,'html.parser')
+        sesskey  =  soup.find('input',attrs={'name':'sesskey'})['value']
+        client_id = self.getclientid(resp.text)
+        filepath = '/'
+        query = self.extractQuery(soup.find('object',attrs={'type':'text/html'})['data'])
+        payload = {'sesskey': sesskey, 'client_id': client_id,'filepath': filepath, 'itemid': query['itemid']}
+        postfiles = self.path+'repository/draftfiles_ajax.php?action=list'
+        resp = self.session.post(postfiles,data=payload,proxies=self.proxy)
+        dec = json.JSONDecoder()
+        jsondec = dec.decode(resp.text)
+        return jsondec['list']
+   
+    def delteFile(self,name):
+        urlfiles = self.path+'user/files.php'
+        resp = self.session.get(urlfiles,proxies=self.proxy)
+        soup = BeautifulSoup(resp.text,'html.parser')
+        _qf__core_user_form_private_files = soup.find('input',{'name':'_qf__core_user_form_private_files'})['value']
+        files_filemanager = soup.find('input',attrs={'name':'files_filemanager'})['value']
+        sesskey  =  soup.find('input',attrs={'name':'sesskey'})['value']
+        client_id = self.getclientid(resp.text)
+        filepath = '/'
+        query = self.extractQuery(soup.find('object',attrs={'type':'text/html'})['data'])
+        payload = {'sesskey': sesskey, 'client_id': client_id,'filepath': filepath, 'itemid': query['itemid'],'filename':name}
+        postdelete = self.path+'repository/draftfiles_ajax.php?action=delete'
+        resp = self.session.post(postdelete,data=payload,proxies=self.proxy)
 
-        thread.store('msg',message)
+        #save file
+        saveUrl = self.path+'lib/ajax/service.php?sesskey='+sesskey+'&info=core_form_dynamic_form'
+        savejson = [{"index":0,"methodname":"core_form_dynamic_form","args":{"formdata":"sesskey="+sesskey+"&_qf__core_user_form_private_files="+_qf__core_user_form_private_files+"&files_filemanager="+query['itemid']+"","form":"core_user\\form\\private_files"}}]
+        headers = {'Content-type': 'application/json', 'Accept': 'application/json, text/javascript, */*; q=0.01'}
+        resp3 = self.session.post(saveUrl, json=savejson,headers=headers,proxies=self.proxy)
 
-        if '/start' in msgText:
-            start_msg = 'Bot          : TGUploaderPro v7.0\n'
-            start_msg+= 'Desarrollador: @obisoftdev\n'
-            start_msg+= 'Api          : https://github.com/Obysoftt/pyobigram\n'
-            start_msg+= 'Uso          :Envia Enlaces De Descarga y Archivos Para Procesar (Configure Antes De Empezar , Vea El /tutorial)\n'
-            bot.editMessageText(message,start_msg)
-        elif '/files' == msgText and user_info['cloudtype']=='moodle':
-             proxy = ProxyCloud.parse(user_info['proxy'])
-             client = MoodleClient(user_info['moodle_user'],
-                                   user_info['moodle_password'],
-                                   user_info['moodle_host'],
-                                   user_info['moodle_repo_id'],proxy=proxy)
-             loged = client.login()
-             if loged:
-                 files = client.getEvidences()
-                 filesInfo = infos.createFilesMsg(files)
-                 bot.editMessageText(message,filesInfo)
-                 client.logout()
-             else:
-                bot.editMessageText(message,'❌Error y Causas🧐\n1-Revise su Cuenta\n2-Servidor Desabilitado: '+client.path)
-        elif '/txt_' in msgText and user_info['cloudtype']=='moodle':
-             findex = str(msgText).split('_')[1]
-             findex = int(findex)
-             proxy = ProxyCloud.parse(user_info['proxy'])
-             client = MoodleClient(user_info['moodle_user'],
-                                   user_info['moodle_password'],
-                                   user_info['moodle_host'],
-                                   user_info['moodle_repo_id'],proxy=proxy)
-             loged = client.login()
-             if loged:
-                 evidences = client.getEvidences()
-                 evindex = evidences[findex]
-                 txtname = evindex['name']+'.txt'
-                 sendTxt(txtname,evindex['files'],update,bot)
-                 client.logout()
-                 bot.editMessageText(message,'TxT Aqui👇')
-             else:
-                bot.editMessageText(message,'❌Error y Causas🧐\n1-Revise su Cuenta\n2-Servidor Desabilitado: '+client.path)
-             pass
-        elif '/del_' in msgText and user_info['cloudtype']=='moodle':
-            findex = int(str(msgText).split('_')[1])
-            proxy = ProxyCloud.parse(user_info['proxy'])
-            client = MoodleClient(user_info['moodle_user'],
-                                   user_info['moodle_password'],
-                                   user_info['moodle_host'],
-                                   user_info['moodle_repo_id'],
-                                   proxy=proxy)
-            loged = client.login()
-            if loged:
-                evfile = client.getEvidences()[findex]
-                client.deleteEvidence(evfile)
-                client.logout()
-                bot.editMessageText(message,'Archivo Borrado 🦶')
-            else:
-                bot.editMessageText(message,'❌Error y Causas🧐\n1-Revise su Cuenta\n2-Servidor Desabilitado: '+client.path)
-        elif 'http' in msgText:
-            url = msgText
-            ddl(update,bot,message,url,file_name='',thread=thread,jdb=jdb)
-        else:
-            #if update:
-            #    api_id = os.environ.get('api_id')
-            #    api_hash = os.environ.get('api_hash')
-            #    bot_token = os.environ.get('bot_token')
-            #    
-                # set in debug
-            #    api_id = 7386053
-            #    api_hash = '78d1c032f3aa546ff5176d9ff0e7f341'
-            #    bot_token = '5124841893:AAH30p6ljtIzi2oPlaZwBmCfWQ1KelC6KUg'
+        return resp3
 
-            #    chat_id = int(update.message.chat.id)
-            #    message_id = int(update.message.message_id)
-            #    import asyncio
-            #    asyncio.run(tlmedia.download_media(api_id,api_hash,bot_token,chat_id,message_id))
-            #    return
-            bot.editMessageText(message,'😵No se pudo procesar😵')
-    except Exception as ex:
-           print(str(ex))
+    def logout(self):
+        logouturl = self.path + 'login/logout.php?sesskey=' + self.sesskey
+        self.session.post(logouturl,proxies=self.proxy)
 
 
-def main():
-    bot_token = os.environ.get('bot_token')
-
-    #set in debug
-    bot_token = '5270983050:AAGBgDc2TXVkuWNiF2gATBjDSr1Xjpd3z2Q'
-
-    bot = ObigramClient(bot_token)
-    bot.onMessage(onmessage)
-    bot.run()
-
-if __name__ == '__main__':
-    try:
-        main()
-    except:
-        main()
+#client = MoodleClient('obysoft2','Obysoft2001@','https://aulacened.uci.cu/',repo_id=3)
+#loged = client.login()
+#if loged:
+#    req,data = client.upload_file_draft('requirements.txt')
+#    client.createBlog('req',data['id'])
+#   print(data)
+#   list = client.getEvidences()
+#   evidence = client.createEvidence('requirements')
+#   client.upload_file('requirements.txt',evidence,progressfunc=uploadProgres)
+#   client.saveEvidence(evidence)
+#   print(evidence)
